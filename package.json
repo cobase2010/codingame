@@ -1,0 +1,16 @@
+{
+  "name": "codinggame",
+  "version": "1.0.0",
+  "description": "",
+  "main": "./simple-nn2.js",
+  "dependencies": {
+    "mathjs": "^3.8.0",
+    "vectorious": "^4.4.0"
+  },
+  "devDependencies": {},
+  "scripts": {
+    "start": "node ./simple-nn2.js"
+  },
+  "author": "",
+  "license": "ISC"
+}
