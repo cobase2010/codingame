@@ -2,8 +2,20 @@
 #include <stdlib.h>
 #include <cmath>
 #include <sys/time.h>
+#include <array>
+#include <random>
+//#include <chrono>
+#include <functional>
+#include <vector>
 
 using namespace std;
+//using namespace std::this_thread;     // sleep_for, sleep_until
+//using namespace std::literals::chrono_literals; // ns, us, ms, s, h, etc.
+//using namespace std::chrono;
+
+std::random_device rd;
+std::mt19937 gen(rd());
+std::uniform_real_distribution<> dis(0, 1);
 static const double Pi = 3.14159265358979323846264338327950288419717;
 static int randomBetween(int a, int b) {
     return a + rand() % (b - a + 1);
@@ -18,6 +30,12 @@ static unsigned long long timeNow() {
 }
 
 
+template <class T, unsigned I, unsigned J>
+using Matrix = std::array<std::array<T, J>, I>;
+
+template <class T, unsigned I>
+using List = std::array<T, I>;
+
 class Point {
 public:
     Point(float, float);
@@ -28,9 +46,14 @@ public:
     float y;
 };
 
+class Collision;
+
 class Unit : public Point {
 public:
     Unit(int id, float x, float y, float radius, float vx, float vy);
+    virtual ~Unit();
+    Collision* collision(Unit* u);
+    virtual void bounce(Unit*) = 0;
     int id;
     float radius;
     float vx;
@@ -40,6 +63,8 @@ public:
 class Checkpoint : public Unit {
 public:
     Checkpoint(int id, float x, float y, float radius);
+    Checkpoint();
+    void bounce(Unit*) override; //do nothng here.
 };
 
 class Collision {
@@ -52,73 +77,36 @@ public:
 
 class Move {
 public:
+    Move();
     Move(float, int);
     float angle; // Between -18.0 and +18.0
-    int thrust; // Between -1 and 200
+    int thrust; // Between 0 and 200
     void mutate(float);
 };
 
+//Holds a list of moves
 
 class Pod : public Unit {
 public:
     Pod(int id, float x, float y, float radius, float vx, float vy, float angle, int nextCheckpointId);
-    Pod(const Pod& pod);
+    Pod(const Pod&);
+    Pod();
     float getAngle(Point* p);
     float diffAngle(Point* p);
     void rotate(Point* p);
     void rotateAngle(float);
-    void calculateAngle(Point* p, float angleToP);
     void boost(int thrust);
     void move(float t);
     void end();
-    float score();
     void play(Point* p, int thrust);
     void apply(Move*);
-    Checkpoint* checkpoint();
+    void bounce(Unit* u) override;
     float angle;
     int nextCheckpointId;
     int checked;
-};
-
-class Solution {
-
-public:
-    const static int numMoves = 6;
-
-public:
-    Solution(Move**, Move**, Pod**, Checkpoint**, int);
-    Solution(const Solution&);
-    ~Solution(); //need to release memory used by moves
-    void mutate(float amplitude);
-    float score();
-    void load();
-    Move** moves1; //stores an array of array of Move* --this is getting ugly
-    Move** moves2;
-    Pod** pods; //hold a pointer to the cloned pod.
-    Pod** origPods; //hold a pointer to the original pod
-    Checkpoint** checkpoints; //point to an array of checkpoint pointers, need not be released or cloned
-    int numCheckpoints;
- };
-
-class Game
-{
-public:
-    Game();
-    ~Game();
-
-    //bool applyNextMove(Move*);
-    Move** calcNextMove();
-    float* scoreSolutions(Solution**);
-    int findMinScore(float*);
-    int findMaxScore(float*);
-    Solution** generatePopulation();
-    int findLongestCheckpoint();
-    void output(Move**);
-    
-    int numCheckpoints = 0;
-    Pod ** pods = 0;
-    Pod ** enemyPods = 0;
-    Checkpoint **checkpoints = 0;
+    int timeout;
+    int shield; //0: no shield, 1-3 shield with cooldown going down each turn.
+    bool usedBoost;
 };
 
 Point::Point(float x, float y) {
@@ -160,11 +148,86 @@ Unit::Unit(int id, float x, float y, float radius, float vx, float vy)
 {
 
 }
+Unit::~Unit() {
+
+}
 
 Collision::Collision(Unit* a, Unit* b, float t)
    : a(a), b(b), t(t)
 {
+}
 
+Collision* Unit::collision(Unit* u) {
+    // Square of the distance
+    float dist = this->distance2(u);
+
+    // Sum of the radii squared
+    float sr = (this->radius + u->radius)*(this->radius + u->radius);
+
+    // We take everything squared to avoid calling sqrt uselessly. It is better for performances
+
+    if (dist < sr) {
+        // Objects are already touching each other. We have an immediate collision.
+        return new Collision(this, u, 0.0);
+    }
+
+    // Optimisation. Objects with the same speed will never collide
+    if (this->vx == u->vx && this->vy == u->vy) {
+        return nullptr;
+    }
+
+    // We place ourselves in the reference frame of u. u is therefore stationary and is at (0,0)
+    float x = this->x - u->x;
+    float y = this->y - u->y;
+    Point myp(x, y);
+    float vx = this->vx - u->vx;
+    float vy = this->vy - u->vy;
+    Point up(0, 0);
+
+    // We look for the closest point to u (which is in (0,0)) on the line described by our speed vector
+    Point b(x + vx, y + vy);
+    Point* p = up.closest(&myp, &b);
+
+    // Square of the distance between u and the closest point to u on the line described by our speed vector
+    float pdist = up.distance2(p);
+
+    // Square of the distance between us and that point
+    float mypdist = myp.distance2(p);
+
+    // If the distance between u and this line is less than the sum of the radii, there might be a collision
+    if (pdist < sr) {
+     // Our speed on the line
+        float length = sqrt(vx*vx + vy*vy);
+
+        // We move along the line to find the point of impact
+        float backdist = sqrt(sr - pdist);
+        p->x = p->x - backdist * (vx / length);
+        p->y = p->y - backdist * (vy / length);
+
+        // If the point is now further away it means we are not going the right way, therefore the collision won't happen
+        if (myp.distance2(p) > mypdist) {
+            delete p;
+            return nullptr;
+        }
+
+        pdist = p->distance(&myp);
+
+        // The point of impact is further than what we can travel in one turn
+        if (pdist > length) {
+            delete p;
+            return nullptr;
+        }
+
+        // Time needed to reach the impact point
+        float t = pdist / length;
+        delete p;
+
+        return new Collision(this, u, t);
+    }
+
+    delete p;
+
+    return nullptr;
 }
 
 Checkpoint::Checkpoint(int id, float x, float y, float radius)
@@ -172,15 +235,32 @@ Checkpoint::Checkpoint(int id, float x, float y, float radius)
 {
 
 }
+Checkpoint::Checkpoint()
+    : Unit(0, 0, 0, 600, 0, 0) {
+
+}
+
+void Checkpoint::bounce(Unit*) {
+    //do nothing here;
+}
+
+Pod::Pod()
+    : Unit(0, 0, 0, 400, 0, 0), angle(0), nextCheckpointId(0), checked(0), timeout(100), shield(0), usedBoost(false) {
+
+}
 
 Pod::Pod(int id, float x, float y, float radius, float vx, float vy, float angle, int nextCheckpointId)
-    : Unit(id, x, y, radius, vx, vy), angle(angle), nextCheckpointId(nextCheckpointId), checked(0)
+    : Unit(id, x, y, radius, vx, vy), angle(angle), nextCheckpointId(nextCheckpointId), checked(0), timeout(100), shield(0),
+      usedBoost(false)
 {
+
 }
+
 
 Pod::Pod(const Pod& pod)
     : Unit(pod.id, pod.x, pod.y, pod.radius, pod.vx, pod.vy), angle(pod.angle),
-      nextCheckpointId(pod.nextCheckpointId), checked(pod.checked) {
+      nextCheckpointId(pod.nextCheckpointId), checked(pod.checked), timeout(pod.timeout), shield(pod.shield),
+      usedBoost(false) {
 }
 
 void Pod::apply(Move* move) {
@@ -221,19 +301,6 @@ float Pod::diffAngle(Point* p) {
     }
 }
 
-void Pod::calculateAngle(Point* p, float angleToP) {
-		float a = this->getAngle(p);
-		float b = 0.0;
-		//turning right (positive) or turning left (negative)
-		if (angleToP >= 0) {
-			b = a > angleToP ? (a - angleToP) : 360 + a - angleToP;
-		} else { //turning left
-			b = (a - angleToP);
-		}
-		if (b >= 360) b -= 360;
-		this->angle = b;
-}
-
 void Pod::rotate(Point* p) {
     float a = this->diffAngle(p);
 
@@ -260,9 +327,10 @@ void Pod::rotateAngle(float a) {
 
 void Pod::boost(int thrust) {
   // Don't forget that a pod which has activated its shield cannot accelerate for 3 turns
-    /*if (this.shield) {
+    if (this->shield) {
+        this->shield--;
         return;
-    }*/
+    }
 
     // Conversion of the angle to radiants
     float ra = this->angle * Pi / 180.0;
@@ -284,7 +352,7 @@ void Pod::end() {
     this->vy = ::trunc(this->vy * 0.85);
 
     // Don't forget that the timeout goes down by 1 each turn. It is reset to 100 when you pass a checkpoint
-    //this.timeout -= 1;
+    this->timeout -= 1;
 }
 
 void Pod::play(Point* p, int thrust) {
@@ -294,12 +362,55 @@ void Pod::play(Point* p, int thrust) {
     this->end();
 }
 
-Checkpoint* Pod::checkpoint() {
-    return nullptr;  //TODO: need to implement this later.
+void Pod::bounce(Unit* u) {
+
+    // If a pod has its shield active its mass is 10 otherwise it's 1
+    float m1 = this->shield ? 10 : 1;
+    float m2 = ((Pod*)u)->shield ? 10 : 1;   //for enemy pods, we always get back zero since we don't know.
+    float mcoeff = (m1 + m2) / (m1 * m2);
+
+    float nx = this->x - u->x;
+    float ny = this->y - u->y;
+
+    // Square of the distance between the 2 pods. This value could be hardcoded because it is always 800²
+    float nxnysquare = nx*nx + ny*ny;
+
+    float dvx = this->vx - u->vx;
+    float dvy = this->vy - u->vy;
+
+    // fx and fy are the components of the impact vector. product is just there for optimisation purposes
+    float product = nx*dvx + ny*dvy;
+    float fx = (nx * product) / (nxnysquare * mcoeff);
+    float fy = (ny * product) / (nxnysquare * mcoeff);
+
+    // We apply the impact vector once
+    this->vx -= fx / m1;
+    this->vy -= fy / m1;
+    u->vx += fx / m2;
+    u->vy += fy / m2;
+
+    // If the norm of the impact vector is less than 120, we normalize it to 120
+    float impulse = sqrt(fx*fx + fy*fy);
+    if (impulse < 120.0) {
+        fx = fx * 120.0 / impulse;
+        fy = fy * 120.0 / impulse;
+    }
+
+    // We apply the impact vector a second time
+    this->vx -= fx / m1;
+    this->vy -= fy / m1;
+    u->vx += fx / m2;
+    u->vy += fy / m2;
+
+    // This is one of the rare places where a Vector class would have made the code more readable.
+    // But this place is called so often that I can't pay a performance price to make it more readable.
+
 }
 
-float Pod::score() {
-    return this->checked*50000 - this->distance(this->checkpoint()); //need to figure out if the checkpoint is a goal checkpoint
+
+Move::Move()
+    : angle(0), thrust(-2) {
+
 }
 
 Move::Move(float angle, int thrust)
@@ -307,145 +418,226 @@ Move::Move(float angle, int thrust)
 
 }
 
-void Move::mutate(float amplitude) {
-    float ramin = this->angle - 36.0 * amplitude;
-    float ramax = this->angle + 36.0 * amplitude;
+template <typename T>
+struct solution {
+    std::vector<T> chromosomes;
+    int age;
+    double fitnessResult;
+    bool killed;
+};
 
-    if (ramin < -18.0) {
-        ramin = -18.0;
-    }
+template <typename T>
+class PhenoType {
+public:
+    virtual std::vector<T> generate() = 0;
+    virtual std::vector<T> mutate(std::vector<T> solution) = 0;
+    virtual std::vector<T> crossover(std::vector<T> parentA, std::vector<T> parentB) = 0;
+    virtual double fitness (std::vector<T> solution) = 0;
+};
 
-    if (ramax > 18.0) {
-        ramax = 18.0;
-    }
+template <typename T>
+class Population {
+public:
+    static const int tournamentSize = 2;
+public:
+    Population(
+            int populationSize,
+            int maxAge,
+            PhenoType<T>* phenoType);
 
-    this->angle = randomBetween(ramin, ramax);
+    void seedSolution(std::vector<T> seed);
+    std::vector<solution<T>> getSolutions() ;
+    solution<T> getFittest(const std::vector<solution<T>>& solutions);
+    // Select individuals for crossover
+    solution<T> tournamentSelection();
+    solution<T> rouletteSelection();
+    int getKilledAmount();
+    void generate();
+    bool mutate();
+    bool crossover();
+    double doFitness();
+
+private:
+    int PopulationSize = 0;
+    int MaxAge = 0;
+    double totalFitness = 0.0;
+    std::vector<solution<T>> Solutions = {};
+    PhenoType<T>* phenoType = 0;
+};
 
 
-    int pmin = this->thrust - 100 * amplitude;
-    int pmax = this->thrust + 100 * amplitude;
-
-    if (pmin < 0) {
-        pmin = 0;
-    }
-
-    if (pmax > 100) {
-        pmax = 100;
-    }
-
-    this->thrust = randomBetween(pmin, pmax);
-
-    //this.shield = false;
-
+template <typename T>
+Population<T>::Population(
+        int populationSize,
+        int maxAge,
+        PhenoType<T>* phenoType) {
+    PopulationSize = populationSize;
+    MaxAge = maxAge;
+    this->phenoType = phenoType;
+    std::vector<solution<T>> solutions(PopulationSize);
+    Solutions = solutions;
 }
 
-Solution::Solution(Move** moves1, Move** moves2, Pod** myPods, Checkpoint** checkpoints, int numCheckpoints)
-    :moves1(moves1), moves2(moves2), checkpoints(checkpoints), numCheckpoints(numCheckpoints) {
-    origPods = new Pod*[2];
-    pods = new Pod*[2];
-    for (int i=0; i<2; i++) {
-        this->origPods[i] = new Pod(*(myPods[i])); //original Pod, whill not change
-        pods[i] = new Pod(*(myPods[i]));
-    }
-    this->checkpoints = checkpoints; //no need to clone here as we don't worry about memory allocation for checkpoints, the game loop will release them.
-    this->numCheckpoints = numCheckpoints;
+template <typename T>
+void Population<T>::seedSolution(std::vector<T> seed) {
+    Solutions[0].chromosomes = seed;
 }
 
-Solution::Solution(const Solution& solution) {
-
-    this->pods = new Pod*[2];
-    this->origPods = new Pod*[2];
-    for (int i=0; i<2; i++) {
-        this->origPods[i] = new Pod(*(solution.pods[i]));
-        this->pods[i] = new Pod(*(solution.pods[i]));
-    }
-    moves1 = new Move*[Solution::numMoves];  //only store moves for my pods for now
-    moves2 = new Move*[Solution::numMoves];  //only store moves for my pods for now
-    for (int i=0; i<Solution::numMoves; i++) {
-        moves1[i] = new Move(*solution.moves1[i]);
-        moves2[i] = new Move(*solution.moves2[i]);
-    }
-
-    this->checkpoints = solution.checkpoints;
-    this->numCheckpoints = solution.numCheckpoints;
+template <typename T>
+std::vector<solution<T>> Population<T>::getSolutions() {
+    return Solutions;
 }
 
-Solution::~Solution() {
+template <typename T>
+solution<T> Population<T>::getFittest(const std::vector<solution<T>>& solutions) {
+    double best = solutions[0].fitnessResult;
+    int bestIndex = 0;
 
-    for (int i=0; i<Solution::numMoves; i++) {
-        delete moves1[i];
-        delete moves2[i];
+    int i = 0;
+    for (solution<T> s : solutions) {
+        if (best < s.fitnessResult) {
+            best = s.fitnessResult;
+            bestIndex = i;
+        }
+        i++;
     }
-    delete [] moves1;
-    delete [] moves2;
-    for (int i=0; i<2; i++) {
-        delete pods[i];
-        delete origPods[i];
-    }
-    delete[] pods;
-    delete[] origPods;
+    return solutions[bestIndex];
 }
 
-void Solution::mutate(float amplitude) {
-    for (int i = 0; i < Solution::numMoves; i++) {
-        this->moves1[i]->mutate(amplitude);
-        this->moves2[i]->mutate(amplitude);
+// Select individuals for crossover
+template <typename T>
+solution<T> Population<T>::tournamentSelection() {
+    // Create a tournament population
+    solution<T> best;
+    best.fitnessResult = -1 * INFINITY;
+
+    for (int i = 0; i < tournamentSize; i++) {
+        int randomId = rand() % PopulationSize;
+
+        if (Solutions[randomId].fitnessResult > best.fitnessResult) {
+            best = Solutions[randomId];
+        }
+    }
+    return best;
+}
+
+template <typename T>
+solution<T> Population<T>::rouletteSelection() {
+    long s = trunc(totalFitness);
+    long r = rand() % (s+1);
+    int i = 0;
+    while (r > 0) {
+        r -= Solutions[i++].fitneessResult;
+    }
+    return Solutions[i-1];
+}
+
+template <typename T>
+int Population<T>::getKilledAmount() {
+    int result = 0;
+    for (solution<T> s : Solutions) {
+        if (s.killed) {
+            result++;
+        }
+    }
+    return result;
+}
+
+template <typename T>
+void Population<T>::generate() {
+    for (int i=0; i < PopulationSize; i++) {
+        solution<T> s;
+        s.chromosomes = phenoType->generate();
+        s.age = 0;
+        s.killed = false;
+        Solutions[i] = s;
+        //Solutions.push_back(s);
     }
 }
 
-void Solution::load() {
-    for (int i=0; i<2; i++) {
-        delete pods[i];
-        pods[i] = new Pod(*origPods[i]);
+template <typename T>
+bool Population<T>::mutate() {
+    for (std::size_t i = 1; i < Solutions.size(); i++) {
+        Solutions[i].chromosomes = phenoType->mutate(Solutions[i].chromosomes);
+        Solutions[i].age++;
     }
+    return true;
 }
 
-float Solution::score() {
-    // Play out the turns
-    float scores[2] = {0.0, 0.0};
-    for (int i = 0; i < Solution::numMoves; ++i) {
-        // Apply the moves to the pods before playing
+template <typename T>
+bool Population<T>::crossover() {
+     std::vector<solution<T>> NewSolutions(PopulationSize);
+     NewSolutions[0] = getFittest(Solutions); //elitism
 
-        //for now play means just move there, in the future we need consider collisions
-        //play();
-         for (int j=0; j<2; j++) {
-             if (j==0) {
-                pods[j]->apply(moves1[i]);
-             } else {
-                pods[j]->apply(moves2[i]);
-             }
-             pods[j]->move(1.0);
-             pods[j]->end(); //end the turn
+     for (int i=1; i<PopulationSize; i++) {
+         solution<T> dad = tournamentSelection();
+         solution<T> mom = tournamentSelection();
+         //solution<T> dad = rouletteSelection();
+         //solution<T> mom = rouletteSelection();
+         std::vector<T> chromosomes = phenoType->crossover(dad.chromosomes, mom.chromosomes);
+         solution<T> child;
+         child.chromosomes = chromosomes;
+         child.age = 0;
+         child.killed = false;
+         NewSolutions[i] = child;
+     }
+     Solutions = NewSolutions;
+     return true;
+ }
 
-             Checkpoint* currentCheckpoint = this->checkpoints[pods[j]->nextCheckpointId];
+template <typename T>
+double Population<T>::doFitness() {
+    double fitnessResult;
+    totalFitness = 0.0; //initialize
+    for (std::size_t i = 0; i < Solutions.size(); i++) {
+        fitnessResult = phenoType->fitness(Solutions[i].chromosomes);
+        Solutions[i].fitnessResult = fitnessResult;
+        totalFitness += fitnessResult;
 
-             //first check if we've already reached the current checkpoint
-             float d = pods[j]->distance2(currentCheckpoint);
-             if (d < ((pods[j]->radius -100) * (pods[j]->radius -100))) {
-                 /* if (currentCheckpoint->id == 0) { //id 0 always indicate the start of a lap
-                lapped = true;
-            }
-
-            qDebug("Collision with");
-            qDebug() << (myPod->nextCheckpointId) << d << myPod->x << myPod->y
-                     << currentCheckpoint->x << currentCheckpoint->y; */
-                 pods[j]->nextCheckpointId = (pods[j]->nextCheckpointId+1) % this->numCheckpoints;
-                 //update score to indicate big hit!
-                 scores[j] += 50000; //may need to lower the weight if the next few moves are not optimized.
-             } else {
-                 scores[j] -= sqrt(d); //the further, the lower the score
-             }
-         }
+        /*if (Decide(fitnessResult)) {
+            Solutions[i].killed = true;
+        } else if (Solutions[i].age > MaxAge) {
+            Solutions[i].killed = true;
+        }*/
     }
-
-    // Compute the score
-    //float result = evaluation();
-
-    // Reset everyone to their initial states
-    load();
-
-    return scores[0] + scores[1];
+    return 0.0;
 }
+
+
+
+class Game: public PhenoType<float>
+{
+public:
+    static const int chromosomeSize = 24; //2 x 12 for two pods
+    static const int mutationRate = 5;
+    static const int populationSize = 50;
+
+public:
+    Game();
+    ~Game();
+
+    void startGame();
+    void reload() { pods = origPods; }
+    bool applyNextMove(List<Move, 2>);
+    List<Move, 2> calcNextMove();
+    void generateNewSetting();
+    void play();
+    std::vector<float> decode(std::vector<float> input);
+    float encode(int num, float gen);
+    std::vector<float> generate() override;
+    std::vector<float> generateAIMoves();
+    std::vector<float> mutate(std::vector<float> solution) override;
+    std::vector<float> crossover(std::vector<float> parentA, std::vector<float> parentB) override;
+    double fitness (std::vector<float> solution) override;
+    bool decideToKill(double fit);
+    void output(const List<Move, 2> & moves);
+
+public:
+    List<Pod, 4> pods;
+    List<Pod, 4> origPods;
+    List<Checkpoint, 8> checkpoints;
+    int numCheckpoints = 0;
+};
 
 
 Game::Game()
@@ -454,178 +646,58 @@ Game::Game()
 
 Game::~Game()
 {
-    for (int i=0; i<2; i++) {
-        if (pods[i])
-        delete this->pods[i];
-        if (enemyPods[i])
-        delete this->enemyPods[i];
-    }
-    delete [] pods;
-    delete [] enemyPods;
-
-    for (int i=0; i<this->numCheckpoints; i++) {
-          if (checkpoints[i])
-          delete checkpoints[i];
-    }
-    delete [] checkpoints;
 }
-
-float* Game::scoreSolutions(Solution** solutions) {
-    float* scores = new float[5];
-    for (int i=0; i<5; i++) {
-        scores[i] = solutions[i]->score();
-    }
-    return scores;
-}
-
-int Game::findMinScore(float* scores) {
-    float minScore = INFINITY;
-    int minIndex = -1;
-    for (int i=0; i<5; i++) {
-        if (scores[i] < minScore) {
-            minIndex = i;
-            minScore = scores[i];
-        }
-    }
-    return minIndex;
-
-}
-
-int Game::findMaxScore(float* scores) {
-    float maxScore = -1 * INFINITY;
-    int maxIndex = -1;
-    for (int i=0; i<5; i++) {
-        if (scores[i] > maxScore) {
-            maxIndex = i;
-            maxScore = scores[i];
-        }
-    }
-    return maxIndex;
-}
-
-//Generate next move using AI
-Move** Game::calcNextMove() {
-   Move** bestMoves = new Move*[2]; //to be released in the run loop.
-   //qDebug() << "allocating move**";
-
-   Solution** solutions = generatePopulation();
-   float* scores= scoreSolutions(solutions);
-
-   /*qDebug("Scores:");
-   for (int i=0; i<5; i++) {
-       qDebug() << scores[i];
-   }*/
-   float amplitude = 1.0;
-
-   unsigned long long t0 = timeNow();
-   unsigned long long t1 = t0;
-   unsigned int sum = 0;
-
-   while (t1-t0 < 140) {
-       /*
-       if (abort) {
-           qDebug("abort called");
-           for (int i=0; i<5; i++) {
-               //qDebug() << "deleting Solution*";
-               delete solutions[i];
+std::vector<float> Game::decode(std::vector<float> input) {
+    std::vector<float> result(Game::chromosomeSize);
+    for (std::size_t i=0; i<input.size(); i++) {
+        if (i % 2 == 0) {
+            //angle
+           if (input[i] < 0.25) {
+               result[i] = -18.0;
+           } else if (input[i] > 0.75) {
+               result[i] = 18.0;
+           } else {
+               result[i] = -18 + 36 * ((input[i] - 0.25) * 2.0);
            }
-           delete [] solutions;
-           delete [] scores;
-           delete [] bestMoves;
-            return nullptr;
-       }*/
-    sum++;
-    int minScoreIndex = findMinScore(scores);
-    int index = randomBetween(0, 4);
-    Solution* solution = solutions[index];
-    Solution* newSolution = new Solution(*solution);
-    //qDebug() << "allocating Solution*";
-    newSolution->mutate(amplitude);
-
-    float score = newSolution->score();
-    if (score > scores[minScoreIndex]) {
-       // qDebug() << "deleting Solution*";
-        delete solutions[minScoreIndex];
-        solutions[minScoreIndex] = newSolution;
-        scores[minScoreIndex] = score;
-    } else {
-        //qDebug() << "deleting Solution*";
-        delete newSolution; //not good, throw away
-    }
-    t1 = timeNow();
-   }
-
-   int maxScoreIndex = findMaxScore(scores);
-   Solution* bestSolution = solutions[maxScoreIndex];
-
-   bestMoves[0] = new Move(bestSolution->moves1[0]->angle, bestSolution->moves1[0]->thrust); //take the first move.
-   bestMoves[1] = new Move(bestSolution->moves2[0]->angle, bestSolution->moves2[0]->thrust); //take the first move.
-
-   for (int i=0; i<5; i++) {
-       //qDebug() << "deleting Solution*";
-       delete solutions[i];
-   }
-   delete [] solutions;
-   delete [] scores;
-
-  // qDebug() << sum << " iterations";
-   return bestMoves;
-}
-
-/*
-bool Game::applyNextMove(Move* move)
-{
-    bool lapped = false;
-    Checkpoint* currentCheckpoint = this->checkpoints[this->myPod->nextCheckpointId];
-
-    //first check if we've already reached the current checkpoint
-    float d = myPod->distance(currentCheckpoint);
-    if (d < (myPod->radius)) {
-        if (currentCheckpoint->id == 0) { //id 0 always indicate the start of a lap
-            lapped = true;
-        }
-
-       // qDebug("Collision with");
-       // qDebug() << (myPod->nextCheckpointId) << d << myPod->x << myPod->y
-       //          << currentCheckpoint->x << currentCheckpoint->y;
-        myPod->nextCheckpointId = (myPod->nextCheckpointId+1) % numCheckpoints;
-        currentCheckpoint = this->checkpoints[myPod->nextCheckpointId];
-    }
-
-    myPod->rotateAngle(move->angle);
-    myPod->boost(move->thrust);
-    myPod->move(1.0);
-    myPod->end();
-    //qDebug() << myPod->x << myPod->y;
-    //qDebug() << angle << thrust;
-    //this->msleep(150); //sleep for 150 ms
-    return lapped;
-}
-*/
-
-
-Solution** Game::generatePopulation() {
-    Solution ** solutions = new Solution*[5]; //five solutions
-    for (int j=0; j<4; j++) { //4 random solutions
-
-            Move** moves1 = new Move*[Solution::numMoves];
-            Move** moves2 = new Move*[Solution::numMoves];
-            for (int i = 0; i < Solution::numMoves; i++) { //6 moves
-                moves1[i] = new Move(randomBetween(-18, 18), randomBetween(0, 100));  //we may ignore the angle
-                moves2[i] = new Move(randomBetween(-18, 18), randomBetween(0, 100));  //we may ignore the angle
+        } else if (i % 2 == 1) {
+            if(input[i] < 0.25) {
+                result[i] = 0;
+            } else if(input[i] > 0.75) {
+                result[i] = 100;
+            } else {
+                result[i] = 100 * ((input[i] - 0.25) * 2.0);
             }
-
-        Solution* solution = new Solution(moves1, moves2, pods, checkpoints, numCheckpoints);
-        solutions[j] = solution;
+        }
     }
+    return result;
+}
 
-    Move** moves1 = new Move*[Solution::numMoves];
-    Move** moves2 = new Move*[Solution::numMoves];
-    for (int k=0; k<2; k++) {
-        //now let's generate an AI solution
-        float diffAngle = pods[k]->diffAngle(checkpoints[pods[k]->nextCheckpointId]);
+//num is either 0 for angle, or 1 for thrust
+float Game::encode(int num, float gen) { //angle
+    if (num == 0) {
+        return (gen + 18) /72 + 0.25;
+    } else {
+        return (gen/100) /2 + 0.25;
+    }
+}
 
-        for (int i = 0; i < Solution::numMoves; i++) {
+
+
+std::vector<float> Game::generate() {
+    std::vector<float> result(Game::chromosomeSize);
+    for(int i = 0; i < Game::chromosomeSize; i++) {
+        //result.push_back(dis(gen));
+        result[i] = dis(gen);
+    }
+    return result;
+}
+
+std::vector<float> Game::generateAIMoves() {
+    std::vector<float> result(Game::chromosomeSize);
+    for (int j=0; j<2; j++) {
+        float diffAngle = pods[j].diffAngle(&checkpoints[pods[j].nextCheckpointId]);
+
+        for (int i = 0; i < Game::chromosomeSize/4; i++) {
 
             float angle = diffAngle;
             //first figure out thrust
@@ -636,6 +708,12 @@ Solution** Game::generatePopulation() {
                 thrust = round(100 * (180 - std::abs(diffAngle)) / 180);
             }
             if (thrust > 100) thrust = 100;
+            //thrust = 50;
+
+            /*if (!(pods[k].usedBoost) && std::abs(diffAngle) < 20 && i==0 && this->distanceToCheckpoint[k] > 9000000) { //only the first move
+            thrust = 650; //one time boost
+            //pods[k].usedBoost = true;
+        }*/
             if (diffAngle > 18) {
                 angle = 18;
             } else if (diffAngle < -18) {
@@ -643,25 +721,236 @@ Solution** Game::generatePopulation() {
             } else {
                 angle = diffAngle;
             }
-            if (k==0) {
-                moves1[i] = new Move(angle, thrust);
-            } else {
-                moves2[i] = new Move(angle, thrust);
-            }
+            result[2*i + j*12] = encode(0, angle);
+            result[2*i + j*12 + 1] = encode(1, thrust);
+
             //now apply the angle
             diffAngle -= angle; //turning
         }
     }
-    Solution* solution = new Solution(moves1, moves2, pods, checkpoints, numCheckpoints);
-
-    solutions[4] = solution;
-    return solutions;
+    return result;
 }
 
 
-void Game::output(Move** moves) {
+
+std::vector<float> Game::mutate(std::vector<float> solution) {
+    for(std::size_t i = 1; i < solution.size(); i++) {  //don't mutate the elite
+        if (rand() % 100 <= Game::mutationRate) {    //1% mutation rate
+            solution[i] = dis(gen);  //new random float
+        }
+    }
+    return solution;
+}
+std::vector<float> Game::crossover(std::vector<float> parentA, std::vector<float> parentB) {
+    std::vector<float> child(Game::chromosomeSize); //reserve space
+   // std::cout << "parentA size: " << parentA.size() << " parentB size: " << parentB.size() << std::endl;
+    for(std::size_t i = 0; i < parentA.size(); i++) {
+        if (rand() % 2 == 1) {      //randomly cross-over between two parents
+            child[i] = parentA[i];
+        } else {
+            child[i] = parentB[i];
+        }
+    }
+    return child;
+}
+
+
+double Game::fitness (std::vector<float> solution) {
+    //let's see if we can get all numbers to be close to .5, using mean sqaure algorithm
+    std::vector<float> moves = decode(solution);  //convert from 0-1 numbers to moves
+    //Pod origPods[2] = {pods[0], pods[1]}; //clone pods
+   // p = p2;
+    //std::cout << "original p===>" << p.x << " " << p.y << std::endl;
+    // Play out the turns
+    float score = 0.0;
+    for (std::size_t i = 0; i < moves.size()/4; i++) {
+        // Apply the moves to the pods before playing
+        for (int j=0; j<2; j++) {
+            Move m(moves[2*i + j*12], moves[2*i+1+12*j]);
+            pods[j].apply(&m);
+
+            pods[j].move(1.0);
+            pods[j].end();
+        }
+        //for now play means just move there, in the future we need consider collisions
+        //play();
+         for (int j=0; j<2; j++) {
+             Checkpoint currentCheckpoint = checkpoints[pods[j].nextCheckpointId];
+
+             //first check if we've already reached the current checkpoint
+             float d = pods[j].distance2(&currentCheckpoint);
+             if (d < 122500) { //radius - 50
+                 //std::cout << "step: " << i << " " << d << " x: " << p.x << " y: " << p.y << std::endl;
+             /*
+            qDebug("Collision with");
+            qDebug() << (myPod->nextCheckpointId) << d << myPod->x << myPod->y
+                     << currentCheckpoint->x << currentCheckpoint->y; */
+                 //std::cout << "hit checkpoint " << currentCheckpoint.id << " score: " << score + (p.checked +1)* 50000 << std::endl;
+                 /*for (auto b: decode(solution)) {
+                     std::cout << b << " ";
+                 }
+                 std::cout << std::endl; */
+                 pods[j].checked++;
+                 pods[j].nextCheckpointId = (pods[j].nextCheckpointId+1) % numCheckpoints;
+                 //update score to indicate big hit!
+                 score += pods[j].checked * 50000; //may need to lower the weight if the next few moves are not optimized.
+             } else {
+                 score -= sqrt(d); //the further, the lower the score
+             }
+         }
+    }
+    reload();
+    return score;
+}
+
+bool Game::decideToKill(double fit) {
+    return fit < -12500;
+}
+
+
+List<Move, 2> Game::calcNextMove() {
+   List<Move, 2> bestMoves; //to be released in the run loop.
+   //qDebug() << "allocating move**";
+   //cerr << "inside calc: " << pods[0].nextCheckpointId << " " << pods[0].angle << " "
+   //           << pods[0].distance(&checkpoints[pods[0].nextCheckpointId]) << endl;
+   Population<float> population(populationSize, 1000, this);
+   population.generate();
+   std::vector<float> aiMoves = generateAIMoves();
+   population.seedSolution(aiMoves);
+   population.doFitness();
+
+   unsigned long long t0 = timeNow();
+   unsigned long long t1 = t0;
+   unsigned int sum = 0;
+   int duration = 140;
+
+   while ((int)(t1-t0) < duration) {
+       //if (abort) {
+       //   qDebug("abort called...clean up.");
+        //   return bestMoves;
+       //}
+       sum++;
+       population.crossover();
+       population.mutate();
+       population.doFitness();
+
+       t1 = timeNow();
+
+   }
+
+  //qDebug("total iterations: ");
+  //qDebug() << sum;
+  cerr << "total iterations: " << sum << endl;
+
+   solution<float> bestSolution = population.getFittest(population.getSolutions());
+   std::vector<float> moves = decode(bestSolution.chromosomes);
+   for (int i=0; i<2; i++) {
+
+       //std::cout << "moves size: " << moves.size() << std::endl;
+       Move move(moves[0 + 12 * i], moves[1 + 12 * i]);
+       bestMoves[i] = move;
+   }
+
+   //qDebug("winning solution");
+   //qDebug() << maxScoreIndex;
+
+
+  // qDebug() << sum << " iterations";
+
+
+   return bestMoves;
+}
+
+void Game::play() {
+    // This tracks the time during the turn. The goal is to reach 1.0
+    float t = 0.0;
+    int numPods = 4;
+    //safety measure to prevent infinite loop
+    Collision * prevCollision = nullptr;
+
+    while (t < 1.0) {
+        Collision* firstCollision = nullptr;
+        if (abort) {
+            //qDebug("Abort called from within play()");
+            return;
+        }
+
+        // We look for all the collisions that are going to occur during the turn
+        for (int i = 0; i < numPods; ++i) {
+            // Collision with another pod?
+            for (int j = i + 1; j < numPods; ++j) {
+                Collision* col = pods[i].collision(&pods[j]); //found a collision
+
+                // If the collision occurs earlier than the one we currently have we keep it
+                if (col != nullptr && col->t + t < 1.0 && (firstCollision == nullptr || col->t < firstCollision->t)) {
+                    if (firstCollision) {
+                        delete firstCollision; //release before assign a new one
+                        firstCollision = nullptr;
+                    }
+                    firstCollision = col;
+                } else {
+                    if (col) delete col; //need to clean this up before the second loop;
+                }
+            }
+
+            // Collision with another checkpoint?
+            // It is unnecessary to check all checkpoints here. We only test the pod's next checkpoint.
+            // We could look for the collisions of the pod with all the checkpoints, but if such a collision happens it wouldn't impact the game in any way
+            //No need to check checkpoints collision at this point, it's not correct anyway.
+            //Collision col = pods[i].collision(checkpoints[pods[i].nextCheckpointId]);
+
+            // If the collision happens earlier than the current one we keep it
+            /*if (col != null && col.t + t < 1.0 && (firstCollision == null || col.t < firstCollision.t)) {
+                firstCollision = col;
+            }*/
+        }
+        if (firstCollision) {
+           // qDebug() << firstCollision->t;
+            if (prevCollision != nullptr && prevCollision->t == 0 &&
+                firstCollision->t == prevCollision->t && prevCollision->a == firstCollision->a &&
+                prevCollision->b == firstCollision->b) {
+                    delete firstCollision;
+                    firstCollision = nullptr; //ignore it since we've already seen it with zero t and same two units
+            }
+        }
+
+        if (firstCollision == nullptr) {
+            // No collision, we can move the pods until the end of the turn
+            for (int i = 0; i < numPods; ++i) {
+                pods[i].move(1.0 - t);
+            }
+
+            // End of the turn
+            t = 1.0;
+        } else {
+            // Move the pods to reach the time `t` of the collision
+            for (int i = 0; i < numPods; ++i) {
+                pods[i].move(firstCollision->t);
+            }
+
+            // Play out the collision
+         firstCollision->a->bounce(firstCollision->b);
+
+            t += firstCollision->t;
+            if (prevCollision) delete prevCollision;
+            prevCollision = new Collision(firstCollision->a, firstCollision->b, firstCollision->t); //save a copy for safty check.
+            delete firstCollision;
+            firstCollision = nullptr;
+        }
+    }
+    if (prevCollision) {
+        delete prevCollision;
+    }
+    for (int i = 0; i < numPods; ++i) {
+        pods[i].end();
+    }
+}
+
+
+
+void Game::output(const List<Move, 2> & moves) {
     for (int i=0; i<2; i++) {
-    float a = pods[i]->angle + moves[i]->angle;
+    float a = pods[i].angle + moves[i].angle;
 
     if (a >= 360.0) {
         a = a - 360.0;
@@ -672,18 +961,25 @@ void Game::output(Move** moves) {
     // Look for a point corresponding to the angle we want
     // Multiply by 10000.0 to limit rounding errors
     a = a * Pi / 180.0;
-    float px = pods[i]->x + cos(a) * 10000.0;
-    float py = pods[i]->y + sin(a) * 10000.0;
+    float px = pods[i].x + cos(a) * 10000.0;
+    float py = pods[i].y + sin(a) * 10000.0;
 
     //if (move.shield) {
     //    print(round(px), round(py), "SHIELD");
     //    activateShield();
     //} else {
-    cout << round(px) << " " <<  round(py) << " " << moves[i]->thrust << endl;
+    string thrust = std::to_string(moves[i].thrust);
+    if (moves[i].thrust > 100) {
+        pods[i].usedBoost = true;
+        thrust = "BOOST";
+    }
+
+    cout << round(px) << " " <<  round(py) << " " << thrust << endl;
     }
    // }
 }
 
+/*
 int Game::findLongestCheckpoint() {
     long longest = 0;
     int index = -1;
@@ -696,7 +992,7 @@ int Game::findLongestCheckpoint() {
     }
     return index;
 }
-
+*/
 
 int main()
 {
@@ -705,30 +1001,27 @@ int main()
     cin >> laps; cin.ignore();
     int checkpointCount;
     cin >> checkpointCount; cin.ignore();
-    Checkpoint** checkpoints = new Checkpoint*[checkpointCount]; //up to 7 checkpoints
-    Pod** myPods = new Pod*[2];
-    for (int i=0; i<2; i++) {
-        myPods[i] = new Pod(i, 0, 0, 400, 0, 0, 0, 0);
-    }
-    Pod** enemyPods = new Pod*[2];
-    for (int i=0; i<2; i++) {
-        enemyPods[i] = new Pod(i, 0, 0, 400, 0, 0, 0, 0);
-    }
+    Game theGame;
+    theGame.numCheckpoints = checkpointCount;
+    /*List<Checkpoint, 8> checkpoints; //up to 8 checkpoints
+    List<Pod, 4> pods;
+    theGame.checkpoints = checkpoints;
+    theGame.pods = pods;*/
+
     for (int i = 0; i < checkpointCount; i++) {
         int checkpointX;
         int checkpointY;
         cin >> checkpointX >> checkpointY; cin.ignore();
-        Checkpoint* c = new Checkpoint(i, checkpointX, checkpointY, 600);
-        checkpoints[i] = c;
+        //cerr << checkpointX << " " << checkpointY << endl;
+        Checkpoint c(i, checkpointX, checkpointY, 600);
+        theGame.checkpoints[i] = c;
     }
-    Game theGame;
-    theGame.pods = myPods;
-    theGame.enemyPods = enemyPods;
-    theGame.checkpoints = checkpoints;
-    theGame.numCheckpoints = checkpointCount;
-    int longestCheckpointStart = theGame.findLongestCheckpoint(); //this will find the longest distance
-    bool usedBoost1 = false;
-    bool usedBoost2 = false;
+
+   // cerr << "checkpoing 1: " << theGame.checkpoints[1].x << " " << theGame.checkpoints[1].y << endl;
+     
+    //int longestCheckpointStart = theGame.findLongestCheckpoint(); //this will find the longest distance
+    //bool usedBoost1 = false;
+    //bool usedBoost2 = false;
 
     // game loop
     while (1) {
@@ -740,11 +1033,19 @@ int main()
             int angle; // angle of your pod
             int nextCheckPointId; // next check point id of your pod
             cin >> x >> y >> vx >> vy >> angle >> nextCheckPointId; cin.ignore();
-            myPods[i]->x = x, myPods[i]->y = y; myPods[i]->nextCheckpointId = nextCheckPointId;
-            myPods[i]->vx = vx; myPods[i]->angle = angle;
-            
+            theGame.pods[i].id = i;
+            theGame.pods[i].x = x, theGame.pods[i].y = y; theGame.pods[i].nextCheckpointId = nextCheckPointId;
+            theGame.pods[i].vx = vx; theGame.pods[i].vy = vy; theGame.pods[i].angle = angle;  
+            //float d = theGame.pods[i].distance2(&theGame.checkpoints[theGame.pods[0].nextCheckpointId]);
+             //cache the distance in theGame.
+            //theGame.distanceToCheckpoint[i] = d;
+            //cerr << i << "pod " << i << " angle: " << theGame.pods[i].angle << " "
+            //    << theGame.pods[i].x << " " << theGame.pods[i].y << " " << theGame.pods[i].vx << " " << theGame.pods[i].vy
+            //     << " " << theGame.pods[i].nextCheckpointId << endl;
         }
-        for (int i = 0; i < 2; i++) {
+        
+
+        for (int i = 2; i < 4; i++) {
             int x2; // x position of the opponent's pod
             int y2; // y position of the opponent's pod
             int vx2; // x speed of the opponent's pod
@@ -752,24 +1053,34 @@ int main()
             int angle2; // angle of the opponent's pod
             int nextCheckPointId2; // next check point id of the opponent's pod
             cin >> x2 >> y2 >> vx2 >> vy2 >> angle2 >> nextCheckPointId2; cin.ignore();
-            enemyPods[i]->x = x2, enemyPods[i]->y = y2; enemyPods[i]->nextCheckpointId = nextCheckPointId2;
-            enemyPods[i]->vx = vx2; enemyPods[i]->vy = vy2; enemyPods[i]->angle = angle2;
+            theGame.pods[i].id = i;
+            theGame.pods[i].x = x2, theGame.pods[i].y = y2; theGame.pods[i].nextCheckpointId = nextCheckPointId2;
+            theGame.pods[i].vx = vx2; theGame.pods[i].vy = vy2; theGame.pods[i].angle = angle2; 
+            
         }
+        theGame.origPods = theGame.pods; //clone 
 
-        Move** moves = theGame.calcNextMove(); //TODO: this will need to return 2 moves.
+        if (theGame.pods[0].angle < 0) { //first round
+            cout << theGame.checkpoints[1].x << " " << theGame.checkpoints[1].y << " BOOST" << endl;
+            cout << theGame.checkpoints[1].x << " " << theGame.checkpoints[1].y << " BOOST" << endl;
+            continue; 
+        }
+        List<Move, 2> moves = theGame.calcNextMove(); //TODO: this will need to return 2 moves.
+
+
+       //cerr << theGame.pods[0].nextCheckpointId << " " << theGame.pods[0].angle << " " << moves[0].angle << " " << moves[0].thrust << " "
+       //       << theGame.pods[0].distance(&theGame.checkpoints[theGame.pods[0].nextCheckpointId]) << endl;
+         
         /*if (!usedBoost && laps > 1 && currentCheckpointId-1 == longestCheckpointStart && std::abs(nextCheckpointAngle) < 20) {
             usedBoost = true;
             cout << nextCheckpointX << " " << nextCheckpointY << " BOOST" << endl;
         } else { */
-            theGame.output(moves);
+        
+        theGame.output(moves);
        /* }*/
 
        // cerr << "vx: " << myPod->vx << " vy: " << myPod->vy << " angle: " << myPod->angle << " diffAngle " << nextCheckpointAngle << endl; 
         //cout << nextCheckpointX << " " << nextCheckpointY << " " << thrust << " vx: " << myPod->vx << " vy: " << myPod->vy << " angle: " << myPod->angle << endl;
-        for (int i=0; i<2; i++) {
-            delete moves[i];
-        }
 
-        delete [] moves;
     }
 }
