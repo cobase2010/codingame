@@ -391,7 +391,7 @@ void Pod::bounce(Unit* u) {
 
     // If the norm of the impact vector is less than 120, we normalize it to 120
     float impulse = sqrt(fx*fx + fy*fy);
-    if (impulse < 120.0) {
+    if (impulse != 0 && impulse < 120.0) {
         fx = fx * 120.0 / impulse;
         fy = fy * 120.0 / impulse;
     }
@@ -610,7 +610,7 @@ class Game: public PhenoType<float>
 public:
     static const int chromosomeSize = 24; //2 x 12 for two pods
     static const int mutationRate = 5;
-    static const int populationSize = 50;
+    static const int populationSize = 40;
 
 public:
     Game();
@@ -756,11 +756,8 @@ std::vector<float> Game::crossover(std::vector<float> parentA, std::vector<float
 
 
 double Game::fitness (std::vector<float> solution) {
-    //let's see if we can get all numbers to be close to .5, using mean sqaure algorithm
     std::vector<float> moves = decode(solution);  //convert from 0-1 numbers to moves
-    //Pod origPods[2] = {pods[0], pods[1]}; //clone pods
-   // p = p2;
-    //std::cout << "original p===>" << p.x << " " << p.y << std::endl;
+
     // Play out the turns
     float score = 0.0;
     for (std::size_t i = 0; i < moves.size()/4; i++) {
@@ -769,11 +766,13 @@ double Game::fitness (std::vector<float> solution) {
             Move m(moves[2*i + j*12], moves[2*i+1+12*j]);
             pods[j].apply(&m);
 
+            //Need to apply enemy pods moves here. Otherwise, play doesn't make sense.
+
             pods[j].move(1.0);
             pods[j].end();
         }
         //for now play means just move there, in the future we need consider collisions
-        //play();
+         //play();
          for (int j=0; j<2; j++) {
              Checkpoint currentCheckpoint = checkpoints[pods[j].nextCheckpointId];
 
@@ -864,7 +863,7 @@ List<Move, 2> Game::calcNextMove() {
 void Game::play() {
     // This tracks the time during the turn. The goal is to reach 1.0
     float t = 0.0;
-    int numPods = 4;
+    int numPods = 2;
     //safety measure to prevent infinite loop
     Collision * prevCollision = nullptr;
 
